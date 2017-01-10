@@ -5,10 +5,8 @@ import argparse
 import urlparse
 import uuid
 import difflib
-
-# compare two strings and return true if relatively similar
-#def compare_content(content_1, content_2):
-#    return difflib.SequenceMatcher(None, content_1, content_2).ratio() > 0.75
+import bs4
+import math
 
 #  NOTE: resource owner authentication will differ between implementations
 def authenticate_resource_owner(basic_auth_uri, resource_owner_id, resource_owner_secret):
@@ -30,12 +28,37 @@ def test_authorization_code_flow(cookies, authorize_uri, token_uri, client_id, c
 
     get_authorize_response = requests.get(get_authorize_uri, cookies=cookies, allow_redirects=False)
 
+    # oauth spec recommends to redirect on error (though this is pretty terrible)
+    if get_authorize_response.status_code == 302:
+
+        if 'Location' not in get_authorize_response.headers:
+            print('  FAIL - GET authorize does not have a Location header')
+            return
+
+        if not get_authorize_response.headers['Location'].startswith(redirect_uri):
+            print('  WARN - GET authorize returned invalid Location header %s' % post_authorize_response.headers['Location'])
+
+        print('  *** REDIRECT ON ERROR: %s ***' % get_authorize_response.headers['Location'])
+
+        return
+
     if get_authorize_response.status_code != 200:
         print('  FAIL - GET authorize returned invalid status code %s' % get_authorize_response.status_code)
         return
 
-    # NOTE: authorizing access will differ between implementations
-    post_authorize_response = requests.post(get_authorize_uri, data={'submit': 'Allow access'}, cookies=cookies, allow_redirects=False)
+    # NOTE: authorize will differ between implementations
+    allow_access_form_inputs = {'submit': 'Allow access'}
+
+    # populate form data with hidden variables (try to catch CSRF token, etc.)
+    hidden_form_inputs = {}
+    for i in bs4.BeautifulSoup(get_authorize_response.content, 'html.parser').find_all('input'):
+        if i['type'] == 'hidden':
+            hidden_form_inputs[i['name']] = i['value']
+
+    #if len(data) == 0:
+    #    print('  WARN - GET authorize response does not contain any hidden inputs, it may not contain an anti-XSRF token')
+
+    post_authorize_response = requests.post(get_authorize_uri, data=dict(allow_access_form_inputs, **hidden_form_inputs), cookies=cookies, allow_redirects=False)
 
     if post_authorize_response.status_code != 302:
         print('  FAIL - POST authorize returned invalid status code %s' % post_authorize_response.status_code)
@@ -62,6 +85,11 @@ def test_authorization_code_flow(cookies, authorize_uri, token_uri, client_id, c
 
     code = urlparse.parse_qs(urlparse.urlparse(post_authorize_response.headers['Location']).query)['code'][0]
 
+    post_authorize_xsrf_response = requests.post(get_authorize_uri, data=allow_access_form_inputs, cookies=cookies, allow_redirects=False)
+
+    if post_authorize_xsrf_response.status_code == 302 and post_authorize_xsrf_response.headers['Location'].startswith(redirect_uri):
+        print('  WARN - POST authorize is vulnerable to XSRF')
+
     post_token_response = requests.post(token_uri, data={'grant_type': 'authorization_code', 'redirect_uri': redirect_uri, 'code': code, 'client_id': client_id, 'client_secret': client_secret}, allow_redirects=False)
 
     if post_token_response.status_code != 200:
@@ -81,10 +109,21 @@ def test_authorization_code_flow(cookies, authorize_uri, token_uri, client_id, c
     if post_token_response.json()['expires_in'] > 3600:
         print('  WARN - POST token response has long lived access token (%s seconds)' % post_token_response.json()['expires_in'])
 
+    post_token_reuse_response = requests.post(token_uri, data={'grant_type': 'authorization_code', 'redirect_uri': redirect_uri, 'code': code, 'client_id': client_id, 'client_secret': client_secret}, allow_redirects=False)
+
+    if post_token_reuse_response.status_code == 200 and 'access_token' in post_token_reuse_response.json():
+        print('  WARN - POST token is vulnerable to authorization code re-use')
+
     # also supports basic auth
     #post_token_response = requests.post(token_uri, data={'grant_type': 'authorization_code', 'redirect_uri': redirect_uri, 'code': code}, auth=requests.auth.HTTPBasicAuth(client_id, client_secret), allow_redirects=False)
 
-    print('  *** PASS: %s' % post_token_response.json())
+    # commented out getting resource as it is quite slow and doesn't prove much
+    #get_resource_response = requests.get(args.resource_uri, headers={'Authorization': 'Bearer ' + post_token_response.json()['access_token']})
+    #if get_resource_response.status_code != 200:
+    #    print('  FAIL - GET resource with access_token returned invalid status code %s' % get_resource_response.status_code)
+    #    return
+
+    print('  *** TOKEN ACQUIRED ***')
 
 # generate permutations of redirect_uri and run through test harness
 def test_redirect_uri_permutations(cookies, authorize_uri, token_uri, client_id, client_secret, scope, redirect_uri):
@@ -216,9 +255,6 @@ if __name__ == '__main__':
     print('\nSTANDARD USE:')
     test_authorization_code_flow(cookies, args.authorize_uri, args.token_uri, args.client_id, args.client_secret, args.scope, args.redirect_uri, str(uuid.uuid4()))
 
-    print('\nREDIRECT URI PERMUTATIONS:')
-    test_redirect_uri_permutations(cookies, args.authorize_uri, args.token_uri, args.client_id, args.client_secret, args.scope, args.redirect_uri)
-
     print('\nSCOPE PERMUTATIONS:')
     test_scope_permutations(cookies, args.authorize_uri, args.token_uri, args.client_id, args.client_secret, args.scope, args.redirect_uri)
 
@@ -230,3 +266,15 @@ if __name__ == '__main__':
 
     print('\nCLIENT ID OF DIFFERENT CLIENT:')
     test_authorization_code_flow(cookies, args.authorize_uri, args.token_uri, args.client_id_different_client, args.client_secret, args.scope, args.redirect_uri, str(uuid.uuid4()))
+
+    print('\nREDIRECT URI PERMUTATIONS:')
+    test_redirect_uri_permutations(cookies, args.authorize_uri, args.token_uri, args.client_id, args.client_secret, args.scope, args.redirect_uri)
+
+    print('\nREDIRECT URI PERMUTATIONS (ERROR REDIRECT WITH INVALID CLIENT_ID):')
+    test_redirect_uri_permutations(cookies, args.authorize_uri, args.token_uri, 'demclients', args.client_secret, args.scope, args.redirect_uri)
+
+    print('\nREDIRECT URI PERMUTATIONS (ERROR REDIRECT WITH INVALID CLIENT_SECRET):')
+    test_redirect_uri_permutations(cookies, args.authorize_uri, args.token_uri, args.client_id, 'demsecretz', args.scope, args.redirect_uri)
+
+    print('\nREDIRECT URI PERMUTATIONS (ERROR REDIRECT WITH INVALID SCOPE):')
+    test_redirect_uri_permutations(cookies, args.authorize_uri, args.token_uri, args.client_id, args.client_secret, 'wrongscopebro', args.redirect_uri)

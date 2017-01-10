@@ -29,7 +29,7 @@ def test_authorization_code_flow(cookies, authorize_uri, token_uri, client_id, c
     get_authorize_response = requests.get(get_authorize_uri, cookies=cookies, allow_redirects=False)
 
     # oauth spec recommends to redirect on error (though this is pretty terrible)
-    if get_authorize_response.status_code == 302:
+    if get_authorize_response.status_code == 302 and 'Location' in get_authorize_response.headers:
 
         if 'Location' not in get_authorize_response.headers:
             print('  FAIL - GET authorize does not have a Location header')
@@ -39,7 +39,6 @@ def test_authorization_code_flow(cookies, authorize_uri, token_uri, client_id, c
             print('  WARN - GET authorize returned invalid Location header %s' % post_authorize_response.headers['Location'])
 
         print('  *** REDIRECT ON ERROR: %s ***' % get_authorize_response.headers['Location'])
-
         return
 
     if get_authorize_response.status_code != 200:
@@ -90,6 +89,13 @@ def test_authorization_code_flow(cookies, authorize_uri, token_uri, client_id, c
     if post_authorize_xsrf_response.status_code == 302 and post_authorize_xsrf_response.headers['Location'].startswith(redirect_uri):
         print('  WARN - POST authorize is vulnerable to XSRF')
 
+    # check if can get token with redirect uri not matching original request
+    # post_token_invalid_redirect_uri_response = requests.post(token_uri, data={'grant_type': 'authorization_code', 'redirect_uri': redirect_uri + '/tst', 'code': code, 'client_id': client_id, 'client_secret': client_secret}, allow_redirects=False)
+    # if post_token_invalid_redirect_uri_response.status_code == 200 and 'access_token' in post_token_invalid_redirect_uri_response.json():
+    #     print('  WARN - POST token is vulnerable to modification of redirection uri')
+
+    # todo: check if can get token with candidate auth not matching original request
+
     post_token_response = requests.post(token_uri, data={'grant_type': 'authorization_code', 'redirect_uri': redirect_uri, 'code': code, 'client_id': client_id, 'client_secret': client_secret}, allow_redirects=False)
 
     if post_token_response.status_code != 200:
@@ -109,8 +115,8 @@ def test_authorization_code_flow(cookies, authorize_uri, token_uri, client_id, c
     if post_token_response.json()['expires_in'] > 3600:
         print('  WARN - POST token response has long lived access token (%s seconds)' % post_token_response.json()['expires_in'])
 
+    # check if authorization code can be re-used to acquire a token
     post_token_reuse_response = requests.post(token_uri, data={'grant_type': 'authorization_code', 'redirect_uri': redirect_uri, 'code': code, 'client_id': client_id, 'client_secret': client_secret}, allow_redirects=False)
-
     if post_token_reuse_response.status_code == 200 and 'access_token' in post_token_reuse_response.json():
         print('  WARN - POST token is vulnerable to authorization code re-use')
 
